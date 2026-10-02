@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Modal } from './Modal'
 import { Field, Spinner } from './ui'
 import { useAuth } from '../context/AuthContext'
@@ -25,6 +25,25 @@ const TEMPLATE_LABELS: Record<TemplateKey, string> = {
   'Static Post': 'STATIC POST — Message / Proof / Format',
   Story: 'STORY — 3 frame arc + CTA',
   'YouTube Video': 'YOUTUBE — Cold open / Sections / Outro',
+}
+
+/** Turns a Firestore failure into something the user can act on. */
+function describeCreateError(err: unknown): string {
+  const code = (err as { code?: string } | null)?.code
+  switch (code) {
+    case 'permission-denied':
+      return 'Firestore rejected this write — your account is not allowed to create content.'
+    case 'unavailable':
+      return 'Could not reach Firestore. Check your connection and try again.'
+    case 'deadline-exceeded':
+      return 'Firestore took too long to respond. Please try again.'
+    case 'failed-precondition':
+      return 'Firestore is not ready yet. Please try again in a moment.'
+    default:
+      break
+  }
+  const message = err instanceof Error ? err.message : ''
+  return message || 'Could not create content. Please try again.'
 }
 
 type FormState = {
@@ -68,11 +87,17 @@ export default function AddContentModal({
   const [form, setForm] = useState<FormState>(() => initialForm(defaultDate))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Guards against a second submit before React has re-rendered the disabled button.
+  const submitting = useRef(false)
 
   useEffect(() => {
     if (open) {
       setForm(initialForm(defaultDate))
       setError(null)
+      // Opening always starts a clean session, even if the previous create was
+      // still in flight when the modal was closed.
+      submitting.current = false
+      setSaving(false)
     }
   }, [open, defaultDate])
 
@@ -101,6 +126,8 @@ export default function AddContentModal({
       setError('Pick a publish date.')
       return
     }
+    if (submitting.current) return
+    submitting.current = true
     setSaving(true)
     setError(null)
     const payload: NewContentInput = {
@@ -121,7 +148,11 @@ export default function AddContentModal({
       )
       onCreated(id)
     } catch (err) {
-      setError((err as Error).message || 'Could not create content. Check Firestore rules.')
+      setError(describeCreateError(err))
+    } finally {
+      // Both paths must clear the button: the modal is closed by the parent on
+      // success, but this component stays mounted across open/close cycles.
+      submitting.current = false
       setSaving(false)
     }
   }

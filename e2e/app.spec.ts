@@ -264,6 +264,91 @@ test.describe('Ationic Content Hub', () => {
     await expect(page.getByText('Content deleted')).toBeVisible()
   })
 
+  test('creates many content items sequentially without the create button sticking', async ({
+    page,
+  }) => {
+    await login(page)
+    const created: string[] = []
+    const unique = Date.now()
+
+    // Regression: `saving` used to be reset only on the error path, so the very
+    // first successful create left the modal permanently disabled for every
+    // later open in the same page session. Each round below re-opens the modal
+    // and asserts the button is enabled again before submitting.
+    for (let i = 1; i <= 12; i++) {
+      const title = `E2E Bulk Create ${String(i).padStart(2, '0')} ${unique}`
+      await page.getByRole('button', { name: 'Add Content' }).first().click()
+      await expect(page.getByRole('dialog')).toBeVisible()
+
+      const submit = page.getByRole('button', { name: 'Create content' })
+      await expect(submit, `create button is enabled on round ${i}`).toBeEnabled()
+      await expect(submit).not.toHaveText(/Creating/)
+
+      await page.getByLabel('Content Title').fill(title)
+      await page.getByLabel('Publish Date').fill('2026-10-14')
+      await submit.click()
+
+      // Every create must finish: the modal closes and the success toast lands.
+      await expect(page.getByRole('dialog'), `modal closes on round ${i}`).toHaveCount(0)
+      // Toasts stack for a few seconds, so match the newest one only.
+      await expect(page.getByText('Content added to the calendar').first()).toBeVisible()
+      created.push(title)
+    }
+
+    // Every item reached Firestore, not just the modal round-trip.
+    await page.getByRole('link', { name: 'Content' }).click()
+    for (const title of created) {
+      await page.getByLabel('Search content').fill(title)
+      await expect(page.getByText(title).first(), `list shows "${title}"`).toBeVisible()
+    }
+
+    // Cleanup, one row at a time.
+    for (const title of created) {
+      await page.getByLabel('Search content').fill(title)
+      await page.getByText(title).first().click()
+      await page.getByRole('button', { name: 'Delete' }).click()
+      await page.getByRole('button', { name: 'Delete content' }).click()
+      await expect(page.getByText('Content deleted')).toBeVisible()
+      await page.goto('/content')
+    }
+  })
+
+  test('surfaces a useful error and stays usable when a create fails', async ({ page }) => {
+    await login(page)
+
+    await page.getByRole('button', { name: 'Add Content' }).first().click()
+    // Firestore rejects documents over 1 MiB with a terminal error, so the write
+    // fails for real (and is not retried by the SDK) instead of being mocked.
+    await page.getByLabel('Content Title').fill('X'.repeat(1_200_000))
+    await page.getByLabel('Publish Date').fill('2026-10-14')
+
+    await page.getByRole('button', { name: 'Create content' }).click()
+
+    // A useful message naming the problem, and the modal must stay open.
+    const alert = page.getByRole('alert')
+    await expect(alert).toBeVisible()
+    await expect(alert).toContainText(/title/i)
+    await expect(page.getByRole('dialog')).toBeVisible()
+
+    // The button returns to normal so the user can fix the input and retry.
+    const submit = page.getByRole('button', { name: 'Create content' })
+    await expect(submit).toBeEnabled()
+    await expect(submit).not.toHaveText(/Creating/)
+
+    const retryTitle = `E2E Create Failure ${Date.now()}`
+    await page.getByLabel('Content Title').fill(retryTitle)
+    await submit.click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page.getByText('Content added to the calendar').first()).toBeVisible()
+
+    // Clean up the successful retry.
+    await page.goto('/content')
+    await page.getByText(retryTitle).first().click()
+    await page.getByRole('button', { name: 'Delete' }).click()
+    await page.getByRole('button', { name: 'Delete content' }).click()
+    await expect(page.getByText('Content deleted').first()).toBeVisible()
+  })
+
   test('denies Firestore access to an authenticated user outside the allowlist', async ({ request }) => {
     const { token, uid } = await signInViaEmulator(request, OUTSIDER)
     const headers = { authorization: `Bearer ${token}` }
